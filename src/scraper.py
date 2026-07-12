@@ -1,13 +1,16 @@
 """
 五大联赛转会爬虫 - Transfermarkt
-使用 requests + BeautifulSoup，模拟真实浏览器访问
+使用 cloudscraper 绕过 Cloudflare 防护，准确获取已完成转会数据
 """
-import time
-import requests
+import cloudscraper
 from bs4 import BeautifulSoup
 from src.players import PLAYERS_CN
 
-# 完全模拟 Chrome 浏览器请求头
+# 创建一个浏览器模拟会话
+_scraper = cloudscraper.create_scraper(
+    browser={"browser": "chrome", "platform": "windows", "mobile": False}
+)
+
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                   "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -15,34 +18,20 @@ HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,"
               "image/avif,image/webp,image/apng,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9,de;q=0.8",
-    "Accept-Encoding": "gzip, deflate, br",
     "Referer": "https://www.transfermarkt.com/",
-    "DNT": "1",
-    "Connection": "keep-alive",
-    "Upgrade-Insecure-Requests": "1",
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "same-origin",
-    "Sec-Fetch-User": "?1",
-    "Sec-Ch-Ua": '"Google Chrome";v="125", "Chromium";v="125", "Not.A/Brand";v="24"',
-    "Sec-Ch-Ua-Mobile": "?0",
-    "Sec-Ch-Ua-Platform": '"Windows"',
 }
 
 # 五大联赛俱乐部判定（含常见变体）
 LEAGUE_CLUBS = {
     "英超": [
-        "Arsenal", "Arsenal FC",
-        "Aston Villa",
-        "AFC Bournemouth", "Bournemouth",
+        "Arsenal", "Arsenal FC", "Aston Villa",
+        "Bournemouth", "AFC Bournemouth",
         "Brentford FC", "Brentford",
         "Brighton & Hove Albion", "Brighton",
-        "Chelsea", "Chelsea FC",
-        "Crystal Palace",
+        "Chelsea", "Chelsea FC", "Crystal Palace",
         "Everton", "Everton FC",
         "Fulham", "Fulham FC",
-        "Ipswich Town",
-        "Leicester City",
+        "Ipswich Town", "Leicester City",
         "Liverpool", "Liverpool FC",
         "Manchester City", "Man City",
         "Manchester United", "Man Utd", "Manchester Utd",
@@ -75,7 +64,7 @@ LEAGUE_CLUBS = {
         "CD Leganes", "Leganes",
     ],
     "德甲": [
-        "FC Bayern Munchen", "FC Bayern Munchen", "Bayern Munich", "Bayern Munchen",
+        "FC Bayern Munchen", "FC Bayern München", "Bayern Munich", "Bayern Munchen",
         "Borussia Dortmund", "Dortmund",
         "Bayer 04 Leverkusen", "Bayer Leverkusen",
         "RB Leipzig", "Leipzig",
@@ -139,7 +128,6 @@ LEAGUE_CLUBS = {
 }
 
 CLUB_CN = {
-    # 英超
     "Arsenal": "阿森纳", "Arsenal FC": "阿森纳",
     "Aston Villa": "阿斯顿维拉",
     "Bournemouth": "伯恩茅斯", "AFC Bournemouth": "伯恩茅斯",
@@ -149,102 +137,74 @@ CLUB_CN = {
     "Crystal Palace": "水晶宫",
     "Everton": "埃弗顿", "Everton FC": "埃弗顿",
     "Fulham": "富勒姆", "Fulham FC": "富勒姆",
-    "Ipswich Town": "伊普斯维奇",
-    "Leicester City": "莱斯特城",
+    "Ipswich Town": "伊普斯维奇", "Leicester City": "莱斯特城",
     "Liverpool": "利物浦", "Liverpool FC": "利物浦",
     "Man City": "曼城", "Manchester City": "曼城",
-    "Man Utd": "曼联", "Manchester United": "曼联", "Manchester Utd": "曼联",
+    "Man Utd": "曼联", "Manchester United": "曼联",
     "Newcastle": "纽卡", "Newcastle United": "纽卡",
     "Nottingham Forest": "诺丁汉森林",
     "Southampton": "南安普顿", "Southampton FC": "南安普顿",
     "Tottenham": "热刺", "Tottenham Hotspur": "热刺",
     "West Ham": "西汉姆", "West Ham United": "西汉姆",
     "Wolves": "狼队", "Wolverhampton Wanderers": "狼队",
-    # 西甲
     "Barcelona": "巴萨", "FC Barcelona": "巴萨",
     "Real Madrid": "皇马",
     "Atletico Madrid": "马竞", "Atletico Madrid": "马竞",
     "Sevilla": "塞维利亚", "Sevilla FC": "塞维利亚",
     "Villarreal": "比利亚雷亚尔", "Villarreal CF": "比利亚雷亚尔",
-    "Real Sociedad": "皇家社会",
-    "Real Betis": "贝蒂斯", "Real Betis Balompie": "贝蒂斯",
+    "Real Sociedad": "皇家社会", "Real Betis": "贝蒂斯",
     "Athletic Bilbao": "毕尔巴鄂", "Athletic Club": "毕尔巴鄂",
     "Valencia": "瓦伦西亚", "Valencia CF": "瓦伦西亚",
     "Girona": "赫罗纳", "Girona FC": "赫罗纳",
-    "Osasuna": "奥萨苏纳", "CA Osasuna": "奥萨苏纳",
-    "Getafe": "赫塔费", "Getafe CF": "赫塔费",
-    "Celta Vigo": "塞尔塔", "RC Celta de Vigo": "塞尔塔",
-    "Mallorca": "马洛卡", "RCD Mallorca": "马洛卡",
-    "Rayo Vallecano": "巴列卡诺",
-    "Alaves": "阿拉维斯", "Deportivo Alaves": "阿拉维斯",
-    "Espanyol": "西班牙人", "RCD Espanyol": "西班牙人",
-    "Real Valladolid": "巴拉多利德",
+    "Osasuna": "奥萨苏纳", "Getafe": "赫塔费", "Getafe CF": "赫塔费",
+    "Celta Vigo": "塞尔塔", "RCD Mallorca": "马洛卡",
+    "Rayo Vallecano": "巴列卡诺", "Alaves": "阿拉维斯",
+    "Espanyol": "西班牙人", "Real Valladolid": "巴拉多利德",
     "Leganes": "莱加内斯", "CD Leganes": "莱加内斯",
-    # 德甲
-    "Bayern Munich": "拜仁", "Bayern Munchen": "拜仁",
-    "FC Bayern Munchen": "拜仁", "FC Bayern Munchen": "拜仁",
+    "Bayern Munich": "拜仁", "FC Bayern München": "拜仁",
     "Dortmund": "多特", "Borussia Dortmund": "多特",
-    "Bayer Leverkusen": "勒沃库森", "Bayer 04 Leverkusen": "勒沃库森",
+    "Bayer Leverkusen": "勒沃库森",
     "Leipzig": "莱比锡", "RB Leipzig": "莱比锡",
     "Eintracht Frankfurt": "法兰克福",
     "Stuttgart": "斯图加特", "VfB Stuttgart": "斯图加特",
     "Gladbach": "门兴", "Borussia Mönchengladbach": "门兴",
     "Wolfsburg": "狼堡", "VfL Wolfsburg": "狼堡",
-    "Mainz": "美因茨", "1. FSV Mainz 05": "美因茨",
-    "Werder Bremen": "不莱梅", "SV Werder Bremen": "不莱梅",
-    "Freiburg": "弗赖堡", "SC Freiburg": "弗赖堡",
-    "Augsburg": "奥格斯堡", "FC Augsburg": "奥格斯堡",
-    "Hoffenheim": "霍芬海姆", "TSG 1899 Hoffenheim": "霍芬海姆",
-    "Union Berlin": "柏林联合", "1. FC Union Berlin": "柏林联合",
+    "Mainz": "美因茨", "Werder Bremen": "不莱梅",
+    "Freiburg": "弗赖堡", "FC Augsburg": "奥格斯堡",
+    "Hoffenheim": "霍芬海姆", "Union Berlin": "柏林联合",
     "Bochum": "波鸿", "VfL Bochum": "波鸿",
-    "St. Pauli": "圣保利", "FC St. Pauli": "圣保利",
-    "Heidenheim": "海登海姆", "1. FC Heidenheim 1846": "海登海姆",
+    "St. Pauli": "圣保利", "Heidenheim": "海登海姆",
     "Holstein Kiel": "荷尔斯泰因基尔",
-    # 意甲
     "Juventus": "尤文", "Juventus FC": "尤文",
     "AC Milan": "AC米兰", "Milan": "AC米兰",
     "Inter": "国米", "Inter Milan": "国米",
     "Napoli": "那不勒斯", "SSC Napoli": "那不勒斯",
     "Roma": "罗马", "AS Roma": "罗马",
     "Lazio": "拉齐奥", "SS Lazio": "拉齐奥",
-    "Atalanta": "亚特兰大", "Atalanta BC": "亚特兰大",
-    "Fiorentina": "佛罗伦萨", "ACF Fiorentina": "佛罗伦萨",
-    "Bologna": "博洛尼亚", "Bologna FC": "博洛尼亚",
-    "Torino": "都灵", "Torino FC": "都灵",
-    "Udinese": "乌迪内斯", "Udinese Calcio": "乌迪内斯",
-    "Genoa": "热那亚", "Genoa CFC": "热那亚",
-    "Cagliari": "卡利亚里", "Cagliari Calcio": "卡利亚里",
-    "Lecce": "莱切", "US Lecce": "莱切",
+    "Atalanta": "亚特兰大", "Fiorentina": "佛罗伦萨",
+    "Bologna": "博洛尼亚", "Torino": "都灵",
+    "Udinese": "乌迪内斯", "Genoa": "热那亚",
+    "Cagliari": "卡利亚里", "Lecce": "莱切",
     "Como": "科莫", "Como 1907": "科莫",
-    "Empoli": "恩波利", "Empoli FC": "恩波利",
-    "Parma": "帕尔马", "Parma Calcio 1913": "帕尔马",
-    "Venezia": "威尼斯", "Venezia FC": "威尼斯",
-    "Monza": "蒙扎", "AC Monza": "蒙扎",
+    "Empoli": "恩波利", "Parma": "帕尔马",
+    "Venezia": "威尼斯", "Monza": "蒙扎", "AC Monza": "蒙扎",
     "Verona": "维罗纳", "Hellas Verona": "维罗纳",
-    # 法甲
     "PSG": "巴黎", "Paris Saint-Germain": "巴黎",
     "Marseille": "马赛", "Olympique Marseille": "马赛",
-    "Lyon": "里昂", "Olympique Lyonnais": "里昂",
-    "Monaco": "摩纳哥", "AS Monaco": "摩纳哥",
+    "Lyon": "里昂", "Monaco": "摩纳哥",
     "Lille": "里尔", "LOSC Lille": "里尔",
     "Nice": "尼斯", "OGC Nice": "尼斯",
     "Rennes": "雷恩", "Stade Rennais FC": "雷恩",
     "Lens": "朗斯", "RC Lens": "朗斯",
-    "Strasbourg": "斯特拉斯堡", "RC Strasbourg Alsace": "斯特拉斯堡",
-    "Brest": "布雷斯特", "Stade Brestois 29": "布雷斯特",
-    "Toulouse": "图卢兹", "Toulouse FC": "图卢兹",
-    "Montpellier": "蒙彼利埃", "Montpellier HSC": "蒙彼利埃",
-    "Nantes": "南特", "FC Nantes": "南特",
-    "Le Havre": "勒阿弗尔", "Le Havre AC": "勒阿弗尔",
-    "Reims": "兰斯", "Stade de Reims": "兰斯",
-    "Auxerre": "欧塞尔", "AJ Auxerre": "欧塞尔",
-    "Angers": "昂热", "Angers SCO": "昂热",
-    "Saint-Etienne": "圣埃蒂安", "AS Saint-Etienne": "圣埃蒂安",
+    "Strasbourg": "斯特拉斯堡", "Brest": "布雷斯特",
+    "Toulouse": "图卢兹", "Montpellier": "蒙彼利埃",
+    "Nantes": "南特", "Le Havre": "勒阿弗尔",
+    "Reims": "兰斯", "Auxerre": "欧塞尔",
+    "Angers": "昂热", "Saint-Etienne": "圣埃蒂安",
 }
 
 
-def get_league(club: str) -> str:
-    """通过俱乐部名判断联赛，支持模糊匹配"""
+def get_league(club):
     if not club:
         return None
     c = club.lower().strip()
@@ -256,107 +216,71 @@ def get_league(club: str) -> str:
     return None
 
 
-def cn(club: str) -> str:
-    """英文俱乐部名 -> 中文"""
+def cn(club):
     if not club:
         return ""
     if club in CLUB_CN:
         return CLUB_CN[club]
-    simplified = club.replace(" FC", "").replace(" CF", "").strip()
-    if simplified in CLUB_CN:
-        return CLUB_CN[simplified]
     for key, val in CLUB_CN.items():
         if key.lower() in club.lower() or club.lower() in key.lower():
             return val
     return club
 
 
-def fetch_tm_transfers() -> list[dict]:
-    """获取 Transfermarkt 最新已完成转会（带重试和备用请求头）"""
+def fetch_tm_transfers():
+    """使用 cloudscraper 获取 Transfermarkt 最新已完成转会"""
     url = "https://www.transfermarkt.com/statistik/neuestetransfers"
-
-    # 多组 User-Agent 备用
-    user_agents = [
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-    ]
-
-    last_error = None
-    for attempt, ua in enumerate(user_agents):
-        try:
-            headers = dict(HEADERS)
-            headers["User-Agent"] = ua
-
-            sess = requests.Session()
-            # 先访问首页获取 cookie
-            sess.get("https://www.transfermarkt.com/", headers=headers, timeout=15)
-
-            resp = sess.get(url, headers=headers, timeout=30)
-            resp.raise_for_status()
-
-            soup = BeautifulSoup(resp.text, 'lxml')
-
-            table = soup.find('table', class_='items')
-            if not table:
-                print("  ⚠ 未找到转会数据表格")
-                return []
-
-            tbody = table.find('tbody')
-            if not tbody:
-                return []
-
-            transfers = []
-            rows = tbody.find_all('tr', recursive=False)
-            for tr in rows:
-                t = _parse_row(tr)
-                if t:
-                    transfers.append(t)
-
-            if transfers:
-                return transfers
-            else:
-                print("  ⚠ 表格存在但解析结果为空，尝试备用 UA...")
-                continue
-
-        except Exception as e:
-            last_error = e
-            print(f"  ⚠ 尝试 {attempt+1}/3 失败: {e}")
-            time.sleep(2)
-            continue
-
-    print(f"  ❌ 多次尝试均失败: {last_error}")
-    return []
-
-
-def _parse_row(tr) -> dict | None:
-    """用 BeautifulSoup 解析一行转会数据"""
     try:
-        tds = tr.find_all('td', recursive=False)
+        resp = _scraper.get(url, headers=HEADERS, timeout=30)
+        resp.raise_for_status()
+    except Exception as e:
+        print(f"  ⚠ Transfermarkt 抓取失败: {e}")
+        return []
+
+    soup = BeautifulSoup(resp.text, "lxml")
+
+    table = soup.find("table", class_="items")
+    if not table:
+        print("  ⚠ 未找到数据表格")
+        return []
+
+    tbody = table.find("tbody")
+    if not tbody:
+        return []
+
+    transfers = []
+    rows = tbody.find_all("tr", recursive=False)
+    for tr in rows:
+        t = _parse_row(tr)
+        if t:
+            transfers.append(t)
+
+    return transfers
+
+
+def _parse_row(tr):
+    try:
+        tds = tr.find_all("td", recursive=False)
         if len(tds) < 6:
             return None
 
-        player_a = tds[0].find('a', title=True)
+        player_a = tds[0].find("a", title=True)
         if not player_a:
             return None
-        player = player_a.get('title', '').strip()
+        player = player_a.get("title", "").strip()
         if not player:
             return None
 
         left_club = _extract_club(tds[3])
         joined_club = _extract_club(tds[4])
         fee = tds[5].get_text(strip=True)
-
         league = get_league(left_club) or get_league(joined_club) or "其他"
 
         return {
             "player": player,
             "from_club": left_club,
             "to_club": joined_club,
-            "fee": _normalize_fee(fee),
+            "fee": _fmt_fee(fee),
             "status": "completed",
             "league": league,
         }
@@ -364,16 +288,12 @@ def _parse_row(tr) -> dict | None:
         return None
 
 
-def _extract_club(td) -> str:
-    """从 td 中提取俱乐部名"""
-    a = td.find('a', title=True)
-    if a:
-        return a.get('title', '').strip()
-    return ""
+def _extract_club(td):
+    a = td.find("a", title=True)
+    return a.get("title", "").strip() if a else ""
 
 
-def _normalize_fee(fee: str) -> str:
-    """归一化转会费显示"""
+def _fmt_fee(fee):
     if not fee:
         return "—"
     fee = fee.strip()
@@ -387,8 +307,7 @@ def _normalize_fee(fee: str) -> str:
     return fee
 
 
-def lookup_chinese_player(en_name: str) -> str:
-    """英 -> 中文球员名"""
+def lookup_chinese_player(en_name):
     if en_name in PLAYERS_CN:
         return PLAYERS_CN[en_name]
     en_lower = en_name.lower()
@@ -398,7 +317,7 @@ def lookup_chinese_player(en_name: str) -> str:
     return ""
 
 
-def collect_transfer_news() -> dict:
+def collect_transfer_news():
     """入口：获取转会数据并按联赛分类"""
     print("🔍 从 Transfermarkt 获取最新转会记录...")
     all_t = fetch_tm_transfers()
