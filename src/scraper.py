@@ -1,15 +1,32 @@
 """
 五大联赛转会爬虫 - Transfermarkt
-使用 BeautifulSoup 解析结构化数据，只取五大联赛相关转会
+使用 requests + BeautifulSoup，模拟真实浏览器访问
 """
+import time
 import requests
 from bs4 import BeautifulSoup
 from src.players import PLAYERS_CN
 
+# 完全模拟 Chrome 浏览器请求头
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                   "AppleWebKit/537.36 (KHTML, like Gecko) "
-                  "Chrome/120.0.0.0 Safari/537.36",
+                  "Chrome/125.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,"
+              "image/avif,image/webp,image/apng,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9,de;q=0.8",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Referer": "https://www.transfermarkt.com/",
+    "DNT": "1",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "same-origin",
+    "Sec-Fetch-User": "?1",
+    "Sec-Ch-Ua": '"Google Chrome";v="125", "Chromium";v="125", "Not.A/Brand";v="24"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"Windows"',
 }
 
 # 五大联赛俱乐部判定（含常见变体）
@@ -39,7 +56,7 @@ LEAGUE_CLUBS = {
     "西甲": [
         "FC Barcelona", "Barcelona",
         "Real Madrid",
-        "Atletico Madrid", "Atlético Madrid",
+        "Atletico Madrid", "Atletico Madrid",
         "Sevilla", "Sevilla FC",
         "Villarreal", "Villarreal CF",
         "Real Sociedad",
@@ -58,13 +75,13 @@ LEAGUE_CLUBS = {
         "CD Leganes", "Leganes",
     ],
     "德甲": [
-        "FC Bayern Munchen", "FC Bayern München", "Bayern Munich", "Bayern Munchen",
+        "FC Bayern Munchen", "FC Bayern Munchen", "Bayern Munich", "Bayern Munchen",
         "Borussia Dortmund", "Dortmund",
         "Bayer 04 Leverkusen", "Bayer Leverkusen",
         "RB Leipzig", "Leipzig",
         "Eintracht Frankfurt",
         "VfB Stuttgart", "Stuttgart",
-        "Borussia Mönchengladbach", "Borussia Mönchengladbach", "Gladbach",
+        "Borussia Mönchengladbach", "Gladbach",
         "VfL Wolfsburg", "Wolfsburg",
         "1. FSV Mainz 05", "Mainz",
         "SV Werder Bremen", "Werder Bremen",
@@ -146,7 +163,7 @@ CLUB_CN = {
     # 西甲
     "Barcelona": "巴萨", "FC Barcelona": "巴萨",
     "Real Madrid": "皇马",
-    "Atletico Madrid": "马竞", "Atlético Madrid": "马竞",
+    "Atletico Madrid": "马竞", "Atletico Madrid": "马竞",
     "Sevilla": "塞维利亚", "Sevilla FC": "塞维利亚",
     "Villarreal": "比利亚雷亚尔", "Villarreal CF": "比利亚雷亚尔",
     "Real Sociedad": "皇家社会",
@@ -165,7 +182,7 @@ CLUB_CN = {
     "Leganes": "莱加内斯", "CD Leganes": "莱加内斯",
     # 德甲
     "Bayern Munich": "拜仁", "Bayern Munchen": "拜仁",
-    "FC Bayern Munchen": "拜仁", "FC Bayern München": "拜仁",
+    "FC Bayern Munchen": "拜仁", "FC Bayern Munchen": "拜仁",
     "Dortmund": "多特", "Borussia Dortmund": "多特",
     "Bayer Leverkusen": "勒沃库森", "Bayer 04 Leverkusen": "勒沃库森",
     "Leipzig": "莱比锡", "RB Leipzig": "莱比锡",
@@ -234,7 +251,6 @@ def get_league(club: str) -> str:
     for league, clubs in LEAGUE_CLUBS.items():
         for cl in clubs:
             cl_lower = cl.lower().strip()
-            # 精确匹配 或 包含匹配
             if c == cl_lower or cl_lower in c or c in cl_lower:
                 return league
     return None
@@ -244,14 +260,11 @@ def cn(club: str) -> str:
     """英文俱乐部名 -> 中文"""
     if not club:
         return ""
-    # 尝试精确匹配
     if club in CLUB_CN:
         return CLUB_CN[club]
-    # 尝试去掉后缀匹配
     simplified = club.replace(" FC", "").replace(" CF", "").strip()
     if simplified in CLUB_CN:
         return CLUB_CN[simplified]
-    # 尝试从 CLUB_CN 的 key 中匹配
     for key, val in CLUB_CN.items():
         if key.lower() in club.lower() or club.lower() in key.lower():
             return val
@@ -259,34 +272,64 @@ def cn(club: str) -> str:
 
 
 def fetch_tm_transfers() -> list[dict]:
-    """获取 Transfermarkt 最新已完成转会"""
+    """获取 Transfermarkt 最新已完成转会（带重试和备用请求头）"""
     url = "https://www.transfermarkt.com/statistik/neuestetransfers"
-    try:
-        resp = requests.get(url, headers=HEADERS, timeout=30)
-        resp.raise_for_status()
-    except Exception as e:
-        print(f"  ⚠ Transfermarkt 抓取失败: {e}")
-        return []
 
-    soup = BeautifulSoup(resp.text, 'lxml')
+    # 多组 User-Agent 备用
+    user_agents = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    ]
 
-    table = soup.find('table', class_='items')
-    if not table:
-        print("  ⚠ 未找到转会数据表格")
-        return []
+    last_error = None
+    for attempt, ua in enumerate(user_agents):
+        try:
+            headers = dict(HEADERS)
+            headers["User-Agent"] = ua
 
-    tbody = table.find('tbody')
-    if not tbody:
-        return []
+            sess = requests.Session()
+            # 先访问首页获取 cookie
+            sess.get("https://www.transfermarkt.com/", headers=headers, timeout=15)
 
-    transfers = []
-    rows = tbody.find_all('tr', recursive=False)
-    for tr in rows:
-        t = _parse_row(tr)
-        if t:
-            transfers.append(t)
+            resp = sess.get(url, headers=headers, timeout=30)
+            resp.raise_for_status()
 
-    return transfers
+            soup = BeautifulSoup(resp.text, 'lxml')
+
+            table = soup.find('table', class_='items')
+            if not table:
+                print("  ⚠ 未找到转会数据表格")
+                return []
+
+            tbody = table.find('tbody')
+            if not tbody:
+                return []
+
+            transfers = []
+            rows = tbody.find_all('tr', recursive=False)
+            for tr in rows:
+                t = _parse_row(tr)
+                if t:
+                    transfers.append(t)
+
+            if transfers:
+                return transfers
+            else:
+                print("  ⚠ 表格存在但解析结果为空，尝试备用 UA...")
+                continue
+
+        except Exception as e:
+            last_error = e
+            print(f"  ⚠ 尝试 {attempt+1}/3 失败: {e}")
+            time.sleep(2)
+            continue
+
+    print(f"  ❌ 多次尝试均失败: {last_error}")
+    return []
 
 
 def _parse_row(tr) -> dict | None:
@@ -296,7 +339,6 @@ def _parse_row(tr) -> dict | None:
         if len(tds) < 6:
             return None
 
-        # 球员名（第1列）
         player_a = tds[0].find('a', title=True)
         if not player_a:
             return None
@@ -304,16 +346,10 @@ def _parse_row(tr) -> dict | None:
         if not player:
             return None
 
-        # 离开的俱乐部（第4列, index 3）
         left_club = _extract_club(tds[3])
-
-        # 加入的俱乐部（第5列, index 4）
         joined_club = _extract_club(tds[4])
-
-        # 转会费（第6列, index 5）
         fee = tds[5].get_text(strip=True)
 
-        # 联赛判定
         league = get_league(left_club) or get_league(joined_club) or "其他"
 
         return {
@@ -321,7 +357,7 @@ def _parse_row(tr) -> dict | None:
             "from_club": left_club,
             "to_club": joined_club,
             "fee": _normalize_fee(fee),
-            "status": "completed",   # completed | negotiating | rumor
+            "status": "completed",
             "league": league,
         }
     except Exception:
