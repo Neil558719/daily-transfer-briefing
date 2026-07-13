@@ -239,17 +239,32 @@ def fetch_tm_transfers():
 
     soup = BeautifulSoup(resp.text, "lxml")
 
+    # 调试：打印页面信息
+    print(f"  📄 页面大小: {len(resp.text)} 字节")
+    title_tag = soup.find("title")
+    if title_tag:
+        print(f"  📄 页面标题: {title_tag.get_text(strip=True)}")
+
     table = soup.find("table", class_="items")
     if not table:
-        print("  ⚠ 未找到数据表格")
+        # 调试：看一下页面前 300 字符
+        preview = resp.text[:300].replace("\n", " ").strip()
+        print(f"  ⚠ 未找到 table.items，页面开头: {preview}...")
+        print(f"  🔄 尝试其他选择器...")
+        # 尝试其他可能的选择器
+        table = soup.find("table", {"class": True})
+        if table:
+            print(f"  ✅ 找到备选表格: class={table.get('class')}")
         return []
 
     tbody = table.find("tbody")
     if not tbody:
+        print("  ⚠ 表格内无 tbody")
         return []
 
     transfers = []
     rows = tbody.find_all("tr", recursive=False)
+    print(f"  📊 表格内找到 {len(rows)} 行")
     for tr in rows:
         t = _parse_row(tr)
         if t:
