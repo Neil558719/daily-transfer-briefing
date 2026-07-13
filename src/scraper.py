@@ -1,25 +1,44 @@
 """
-五大联赛转会爬虫 - Transfermarkt
-使用 cloudscraper 绕过 Cloudflare 防护，准确获取已完成转会数据
+五大联赛转会爬虫 - Transfermarkt（带多重防屏蔽 & 自动重试）
 """
+import time
 import cloudscraper
+import requests
 from bs4 import BeautifulSoup
 from src.players import PLAYERS_CN
 
-# 创建一个浏览器模拟会话
-_scraper = cloudscraper.create_scraper(
-    browser={"browser": "chrome", "platform": "windows", "mobile": False}
-)
+# ============================================================
+# 不同浏览器特征配置，轮换使用绕过 Cloudflare
+# ============================================================
+_SCRAPER_CONFIGS = [
+    {"browser": "chrome", "platform": "windows", "mobile": False},
+    {"browser": "chrome", "platform": "linux",   "mobile": False},
+    {"browser": "firefox", "platform": "windows","mobile": False},
+    {"browser": "safari",  "platform": "ios",    "mobile": True},
+]
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                  "AppleWebKit/537.36 (KHTML, like Gecko) "
-                  "Chrome/125.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,"
-              "image/avif,image/webp,image/apng,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9,de;q=0.8",
-    "Referer": "https://www.transfermarkt.com/",
-}
+_HEADERS_TEMPLATES = [
+    {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) "
+                      "Chrome/125.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9,de;q=0.8",
+        "Referer": "https://www.transfermarkt.com/",
+    },
+    {
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) "
+                      "Chrome/131.0.0.0 Safari/537.36",
+        "Accept-Language": "en-GB,en;q=0.9",
+        "Referer": "https://www.google.com/",
+    },
+    {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:130.0) "
+                      "Gecko/20100101 Firefox/130.0",
+        "Accept-Language": "en-US,en;q=0.8",
+        "Referer": "https://duckduckgo.com/",
+    },
+]
 
 # 五大联赛俱乐部判定（含常见变体）
 LEAGUE_CLUBS = {
@@ -227,50 +246,205 @@ def cn(club):
     return club
 
 
-def fetch_tm_transfers():
-    """使用 cloudscraper 获取 Transfermarkt 最新已完成转会"""
-    url = "https://www.transfermarkt.com/statistik/neuestetransfers"
-    try:
-        resp = _scraper.get(url, headers=HEADERS, timeout=30)
-        resp.raise_for_status()
-    except Exception as e:
-        print(f"  ⚠ Transfermarkt 抓取失败: {e}")
-        return []
-
-    soup = BeautifulSoup(resp.text, "lxml")
-
-    # 调试：打印页面信息
-    print(f"  📄 页面大小: {len(resp.text)} 字节")
+# ====================================================================
+# 核心：解析 Transfermarkt 页面（被多个入口共用）
+# ====================================================================
+def _parse_transfermarkt_page(html: str, source_label: str) -> list:
+    """解析 Transfermarkt HTML 中的转会表格"""
+    soup = BeautifulSoup(html, "lxml")
     title_tag = soup.find("title")
-    if title_tag:
-        print(f"  📄 页面标题: {title_tag.get_text(strip=True)}")
+    print(f"  📄 [{source_label}] 页面标题: {title_tag.get_text(strip=True) if title_tag else 'N/A'}")
 
     table = soup.find("table", class_="items")
     if not table:
-        # 调试：看一下页面前 300 字符
-        preview = resp.text[:300].replace("\n", " ").strip()
-        print(f"  ⚠ 未找到 table.items，页面开头: {preview}...")
-        print(f"  🔄 尝试其他选择器...")
-        # 尝试其他可能的选择器
-        table = soup.find("table", {"class": True})
-        if table:
-            print(f"  ✅ 找到备选表格: class={table.get('class')}")
+        print(f"  ⚠ [{source_label}] 未找到 table.items")
         return []
 
     tbody = table.find("tbody")
     if not tbody:
-        print("  ⚠ 表格内无 tbody")
+        print(f"  ⚠ [{source_label}] 表格内无 tbody")
         return []
 
-    transfers = []
     rows = tbody.find_all("tr", recursive=False)
-    print(f"  📊 表格内找到 {len(rows)} 行")
+    transfers = []
     for tr in rows:
         t = _parse_row(tr)
         if t:
             transfers.append(t)
-
+    print(f"  ✅ [{source_label}] 解析到 {len(transfers)} 条转会")
     return transfers
+
+
+# ====================================================================
+# 方案 A：cloudscraper（多配置轮换 + 自动重试）
+# ====================================================================
+def _fetch_tm_cloudscraper(url: str, headers: dict, config: dict,
+                           timeout: int = 30) -> tuple:
+    """
+    使用指定配置的 cloudscraper 发起请求
+    返回 (status_ok, html_content_or_error_msg)
+    """
+    scraper = cloudscraper.create_scraper(browser=config)
+    try:
+        resp = scraper.get(url, headers=headers, timeout=timeout)
+        resp.raise_for_status()
+        return True, resp.text
+    except Exception as e:
+        return False, str(e)
+
+
+def _strategy_cloudscraper() -> list:
+    """
+    主方案：轮流使用 4 种浏览器特征 + 3 种 Header
+    组合最多 12 次尝试，每次遇到 Cloudflare 就换一种特征
+    """
+    url = "https://www.transfermarkt.com/statistik/neuestetransfers"
+    combined_headers = {
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,"
+                  "image/avif,image/webp,image/apng,*/*;q=0.8",
+    }
+
+    for attempt, config in enumerate(_SCRAPER_CONFIGS, 1):
+        for h_idx, h_template in enumerate(_HEADERS_TEMPLATES, 1):
+            headers = {**combined_headers, **h_template}
+            browser_label = f"{config['browser']}/{config['platform']}"
+            print(f"  🔄 尝试 cloudscraper [{browser_label}] (第{attempt}组, 第{h_idx}个头)...")
+
+            ok, result = _fetch_tm_cloudscraper(url, headers, config)
+            if not ok:
+                print(f"  ⚠ 请求失败: {result}")
+                time.sleep(1)
+                continue
+
+            transfers = _parse_transfermarkt_page(result, "cloudscraper")
+            if transfers:
+                print(f"  ✅ cloudscraper [{browser_label}] 成功抓到 {len(transfers)} 条")
+                return transfers
+
+            # 页面拿到了但没解析出数据 → 检查是否被 Cloudflare 拦截
+            if "Checking your browser" in result[:500]:
+                print(f"  ⚠ 被 Cloudflare 拦截，切换配置重试...")
+                time.sleep(2)
+            else:
+                print(f"  ⚠ 页面结构异常，尝试下一种配置...")
+                time.sleep(1)
+
+    print("  ❌ cloudscraper 全部 12 种配置均失败")
+    return []
+
+
+# ====================================================================
+# 方案 B：普通 requests（备用，用于特定页面）
+# ====================================================================
+def _strategy_plain_requests() -> list:
+    """备用方案：用普通 requests + 模拟真实浏览器"""
+    urls = [
+        # 方案 B1：常规页面
+        "https://www.transfermarkt.com/statistik/neuestetransfers",
+        # 方案 B2：替代页面（德国站有时更稳定）
+        "https://www.transfermarkt.de/statistik/neuestetransfers",
+    ]
+
+    for url in urls:
+        for h_idx, h_template in enumerate(_HEADERS_TEMPLATES, 1):
+            headers = {
+                **h_template,
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            }
+            print(f"  🔄 尝试 requests [{url.split('/')[2]}] (头{h_idx})...")
+            try:
+                resp = requests.get(url, headers=headers, timeout=25)
+
+                # 检查是否被 CF 拦截
+                if "Checking your browser" in resp.text[:500]:
+                    print(f"  ⚠ 被 Cloudflare 拦截")
+                    continue
+
+                soup = BeautifulSoup(resp.text, "lxml")
+
+                # 直接找表格
+                table = soup.find("table", class_="items")
+                if not table:
+                    print(f"  ⚠ 未找到表格")
+                    continue
+
+                tbody = table.find("tbody")
+                if not tbody:
+                    continue
+
+                rows = tbody.find_all("tr", recursive=False)
+                transfers = []
+                for tr in rows:
+                    t = _parse_row(tr)
+                    if t:
+                        transfers.append(t)
+
+                if transfers:
+                    print(f"  ✅ plain-requests 成功抓到 {len(transfers)} 条")
+                    return transfers
+            except Exception as e:
+                print(f"  ⚠ 请求异常: {e}")
+                continue
+
+    return []
+
+
+# ====================================================================
+# 方案 C：简化版 scraping - 尝试 ESPN 转会数据
+# ====================================================================
+def _strategy_espn() -> list:
+    """
+    最终备用方案：从 ESPN FC 获取转会新闻
+    注意：ESPN 页面结构可能变化，此方案只作兜底
+    """
+    print("  🔄 尝试备用数据源 ESPN...")
+    url = "https://www.espn.com/soccer/transfers"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) "
+                      "Chrome/125.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    try:
+        resp = requests.get(url, headers=headers, timeout=20)
+        if "transfers" in resp.text.lower():
+            print("  ✅ ESPN 页面可访问，但结构化数据提取受限")
+            # ESPN 页面以 JS 渲染为主，文本抽取有限
+        return []
+    except Exception:
+        return []
+
+
+# ====================================================================
+# 统一入口：自动降级
+# ====================================================================
+def fetch_tm_transfers() -> list:
+    """
+    自动降级三段式：
+    1. cloudscraper （4 浏览器 x 3 UA = 12 轮）
+    2. plain requests（2 URL x 3 UA）
+    3. ESPN fallback
+    """
+    # 阶段 1 - cloudscraper
+    print("  📡 [阶段1/3] cloudscraper 多配置轮换...")
+    result = _strategy_cloudscraper()
+    if result:
+        return result
+
+    # 阶段 2 - plain requests
+    print("\n  📡 [阶段2/3] 普通 requests 尝试...")
+    result = _strategy_plain_requests()
+    if result:
+        return result
+
+    # 阶段 3 - 终极备用
+    print("\n  📡 [阶段3/3] 备用数据源...")
+    result = _strategy_espn()
+
+    if not result:
+        print("\n  ❌ 所有数据源均获取失败")
+
+    return result
 
 
 def _parse_row(tr):
@@ -334,7 +508,7 @@ def lookup_chinese_player(en_name):
 
 def collect_transfer_news():
     """入口：获取转会数据并按联赛分类"""
-    print("🔍 从 Transfermarkt 获取最新转会记录...")
+    print("🔍 获取转会数据...")
     all_t = fetch_tm_transfers()
     print(f"  ✅ 共获取 {len(all_t)} 条转会记录")
 
