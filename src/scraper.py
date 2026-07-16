@@ -2,21 +2,14 @@
 五大联赛转会爬虫 - Transfermarkt（带多重防屏蔽 & 自动重试）
 """
 import time
-import cloudscraper
 import requests
 from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
 from src.players import PLAYERS_CN
 
 # ============================================================
-# 不同浏览器特征配置，轮换使用绕过 Cloudflare
+# 备用方案：requests 的 User-Agent 模板
 # ============================================================
-_SCRAPER_CONFIGS = [
-    {"browser": "chrome", "platform": "windows", "mobile": False},
-    {"browser": "chrome", "platform": "linux",   "mobile": False},
-    {"browser": "firefox", "platform": "windows","mobile": False},
-    {"browser": "safari",  "platform": "ios",    "mobile": True},
-]
-
 _HEADERS_TEMPLATES = [
     {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -276,61 +269,59 @@ def _parse_transfermarkt_page(html: str, source_label: str) -> list:
 
 
 # ====================================================================
-# 方案 A：cloudscraper（多配置轮换 + 自动重试）
+# 方案 A：Playwright 模拟真实浏览器（绕过 Cloudflare）
 # ====================================================================
-def _fetch_tm_cloudscraper(url: str, headers: dict, config: dict,
-                           timeout: int = 30) -> tuple:
+def _strategy_playwright() -> list:
     """
-    使用指定配置的 cloudscraper 发起请求
-    返回 (status_ok, html_content_or_error_msg)
-    """
-    scraper = cloudscraper.create_scraper(browser=config)
-    try:
-        resp = scraper.get(url, headers=headers, timeout=timeout)
-        resp.raise_for_status()
-        return True, resp.text
-    except Exception as e:
-        return False, str(e)
-
-
-def _strategy_cloudscraper() -> list:
-    """
-    主方案：轮流使用 4 种浏览器特征 + 3 种 Header
-    组合最多 12 次尝试，每次遇到 Cloudflare 就换一种特征
+    主方案：用 Playwright 启动 headless Chromium，模拟真实浏览器访问
+    Transfermarkt，完整执行 JS 来通过 Cloudflare 验证。
     """
     url = "https://www.transfermarkt.com/statistik/neuestetransfers"
-    combined_headers = {
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,"
-                  "image/avif,image/webp,image/apng,*/*;q=0.8",
-    }
+    print("  🎭 启动 Playwright (headless Chromium)...")
 
-    for attempt, config in enumerate(_SCRAPER_CONFIGS, 1):
-        for h_idx, h_template in enumerate(_HEADERS_TEMPLATES, 1):
-            headers = {**combined_headers, **h_template}
-            browser_label = f"{config['browser']}/{config['platform']}"
-            print(f"  🔄 尝试 cloudscraper [{browser_label}] (第{attempt}组, 第{h_idx}个头)...")
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=True,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                ]
+            )
+            context = browser.new_context(
+                viewport={"width": 1920, "height": 1080},
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/125.0.0.0 Safari/537.36"
+                ),
+                locale="en-US",
+                timezone_id="Europe/Berlin",
+            )
 
-            ok, result = _fetch_tm_cloudscraper(url, headers, config)
-            if not ok:
-                print(f"  ⚠ 请求失败: {result}")
-                time.sleep(1)
-                continue
+            page = context.new_page()
+            print(f"  🌐 正在访问 Transfermarkt...")
+            page.goto(url, wait_until="networkidle", timeout=60000)
 
-            transfers = _parse_transfermarkt_page(result, "cloudscraper")
-            if transfers:
-                print(f"  ✅ cloudscraper [{browser_label}] 成功抓到 {len(transfers)} 条")
-                return transfers
+            # 等待 Cloudflare 挑战完成 + DOM 渲染
+            page.wait_for_timeout(3000)
 
-            # 页面拿到了但没解析出数据 → 检查是否被 Cloudflare 拦截
-            if "Checking your browser" in result[:500]:
-                print(f"  ⚠ 被 Cloudflare 拦截，切换配置重试...")
-                time.sleep(2)
-            else:
-                print(f"  ⚠ 页面结构异常，尝试下一种配置...")
-                time.sleep(1)
+            html = page.content()
+            browser.close()
 
-    print("  ❌ cloudscraper 全部 12 种配置均失败")
-    return []
+        transfers = _parse_transfermarkt_page(html, "Playwright")
+        if transfers:
+            print(f"  ✅ Playwright 成功抓到 {len(transfers)} 条转会数据！")
+            return transfers
+
+        print("  ⚠ Playwright 拿到页面但未解析到数据，备用方案")
+        return []
+
+    except Exception as e:
+        print(f"  ❌ Playwright 异常: {e}")
+        return []
 
 
 # ====================================================================
@@ -421,13 +412,13 @@ def _strategy_espn() -> list:
 def fetch_tm_transfers() -> list:
     """
     自动降级三段式：
-    1. cloudscraper （4 浏览器 x 3 UA = 12 轮）
+    1. Playwright（headless Chromium，绕过 Cloudflare）
     2. plain requests（2 URL x 3 UA）
     3. ESPN fallback
     """
-    # 阶段 1 - cloudscraper
-    print("  📡 [阶段1/3] cloudscraper 多配置轮换...")
-    result = _strategy_cloudscraper()
+    # 阶段 1 - Playwright
+    print("  📡 [阶段1/3] Playwright 模拟浏览器...")
+    result = _strategy_playwright()
     if result:
         return result
 
